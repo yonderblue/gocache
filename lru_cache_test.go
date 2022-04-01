@@ -189,32 +189,92 @@ func TestCapacityIsObeyed(t *testing.T) {
 	}
 }
 
-func TestLRUIsEvicted(t *testing.T) {
-	size := uint64(3)
+func TestLRUIsEvictedSingle(t *testing.T) {
+	size := uint64(4)
 	cache := NewLRUCache(size)
 
-	evicts := map[interface{}]struct{}{"key3": {}}
-	cache.Evict = func(k interface{}, v Value) {
-		delete(evicts, k)
+	evicts := map[interface{}]struct{}{"key3": {}, "key4": {}}
+	cache.Evict = func(kvs []KV) {
+		for _, kv := range kvs {
+			delete(evicts, kv.K)
+		}
 	}
 
 	cache.Set("key1", &CacheValue{1})
 	cache.Set("key2", &CacheValue{1})
 	cache.Set("key3", &CacheValue{1})
-	// lru: [key3, key2, key1]
+	cache.Set("key4", &CacheValue{1})
+	// lru: [key4, key3, key2, key1]
 
 	// Look up the elements. This will rearrange the LRU ordering.
+	cache.Get("key4")
 	cache.Get("key3")
 	cache.Get("key2")
 	cache.Get("key1")
-	// lru: [key1, key2, key3]
+	// lru: [key1, key2, key3, key4]
 
-	cache.Set("key0", &CacheValue{1})
-	// lru: [key0, key1, key2]
+	cache.Set("keyA", &CacheValue{1})
+	// lru: [keyA, key1, key2, key3]
 
-	// The least recently used one should have been evicted.
+	if len(evicts) != 1 {
+		t.Fatalf("Expected not evicted: %+v", evicts)
+	}
+
+	cache.Set("keyB", &CacheValue{1})
+	// lru: [keyB, keyA, key1, key2]
+
 	if _, ok := cache.Get("key3"); ok {
-		t.Error("Least recently used element was not evicted.")
+		t.Error("Least recently used key3 was not evicted.")
+	}
+	if _, ok := cache.Get("key4"); ok {
+		t.Error("Least recently used key4 was not evicted.")
+	}
+
+	if len(evicts) != 0 {
+		t.Errorf("Expected not evicted: %+v", evicts)
+	}
+}
+
+func TestLRUIsEvictedBatch(t *testing.T) {
+	size := uint64(4)
+	cache := NewLRUCache(size)
+
+	evicts := map[interface{}]struct{}{"key3": {}, "key4": {}}
+	cache.Evict = func(kvs []KV) {
+		for _, kv := range kvs {
+			delete(evicts, kv.K)
+		}
+	}
+	cache.EvictSize = 2
+
+	cache.Set("key1", &CacheValue{1})
+	cache.Set("key2", &CacheValue{1})
+	cache.Set("key3", &CacheValue{1})
+	cache.Set("key4", &CacheValue{1})
+	// lru: [key4, key3, key2, key1]
+
+	// Look up the elements. This will rearrange the LRU ordering.
+	cache.Get("key4")
+	cache.Get("key3")
+	cache.Get("key2")
+	cache.Get("key1")
+	// lru: [key1, key2, key3, key4]
+
+	cache.Set("keyA", &CacheValue{1})
+	// lru: [keyA, key1, key2, key3]
+
+	if len(evicts) != 2 {
+		t.Fatalf("Unexpected eviction: %+v", evicts)
+	}
+
+	cache.Set("keyB", &CacheValue{1})
+	// lru: [keyB, keyA, key1, key2]
+
+	if _, ok := cache.Get("key3"); ok {
+		t.Error("Least recently used key3 was not evicted.")
+	}
+	if _, ok := cache.Get("key4"); ok {
+		t.Error("Least recently used key4 was not evicted.")
 	}
 
 	if len(evicts) != 0 {

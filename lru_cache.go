@@ -31,7 +31,16 @@ type LRUCache struct {
 	// How many bytes we are limiting the cache to.
 	capacity uint64
 
-	Evict func(k interface{}, v Value)
+	evictSize uint64
+	evicts    []KV
+
+	Evict     func([]KV)
+	EvictSize uint64 // size accumulated before Evict is called.
+}
+
+type KV struct {
+	K interface{}
+	V Value
 }
 
 // Values that go into LRUCache need to satisfy this interface.
@@ -72,45 +81,62 @@ func (self *LRUCache) Get(key interface{}) (v Value, ok bool) {
 }
 
 func (self *LRUCache) Set(key interface{}, value Value) {
-	self.mu.Lock()
-	defer self.mu.Unlock()
+	var evicts []KV
+	func() {
+		self.mu.Lock()
+		defer self.mu.Unlock()
 
-	if element := self.table[key]; element != nil {
-		self.updateInplace(element, value)
-	} else {
-		self.addNew(key, value)
-	}
+		if element := self.table[key]; element != nil {
+			self.updateInplace(element, value)
+		} else {
+			self.addNew(key, value)
+		}
+		evicts = self.toEvict()
+	}()
+	self.evict(evicts)
 }
 
 func (self *LRUCache) SetIfAbsent(key interface{}, value Value) {
-	self.mu.Lock()
-	defer self.mu.Unlock()
+	var evicts []KV
+	func() {
+		self.mu.Lock()
+		defer self.mu.Unlock()
 
-	if element := self.table[key]; element != nil {
-		self.moveToFront(element)
-	} else {
-		self.addNew(key, value)
-	}
+		if element := self.table[key]; element != nil {
+			self.moveToFront(element)
+		} else {
+			self.addNew(key, value)
+		}
+		evicts = self.toEvict()
+	}()
+	self.evict(evicts)
 }
 
 func (self *LRUCache) Delete(key interface{}) bool {
-	self.mu.Lock()
-	defer self.mu.Unlock()
+	var evicts []KV
+	ok := func() bool {
+		self.mu.Lock()
+		defer self.mu.Unlock()
 
-	element := self.table[key]
-	if element == nil {
-		return false
-	}
+		element := self.table[key]
+		if element == nil {
+			return false
+		}
 
-	entry := element.Value.(*entry)
+		entry := element.Value.(*entry)
 
-	self.list.Remove(element)
-	delete(self.table, key)
-	self.size -= uint64(entry.size)
-	if self.Evict != nil {
-		self.Evict(entry.key, entry.value)
-	}
-	return true
+		self.list.Remove(element)
+		delete(self.table, key)
+		self.size -= uint64(entry.size)
+
+		self.evictSize += uint64(entry.size)
+		self.evicts = append(self.evicts, KV{entry.key, entry.value})
+		evicts = self.toEvict()
+
+		return true
+	}()
+	self.evict(evicts)
+	return ok
 }
 
 func (self *LRUCache) Clear() {
@@ -193,6 +219,23 @@ func (self *LRUCache) addNew(key interface{}, value Value) {
 	self.checkCapacity()
 }
 
+func (self *LRUCache) evict(kvs []KV) {
+	if self.Evict != nil {
+		self.Evict(kvs)
+	}
+}
+
+// copy so we can evict out of the mutex. nil if not at size.
+func (self *LRUCache) toEvict() []KV {
+	if self.evictSize < self.EvictSize {
+		return nil
+	}
+	v := append([]KV(nil), self.evicts...)
+	self.evicts = self.evicts[:0]
+	self.evictSize = 0
+	return v
+}
+
 func (self *LRUCache) checkCapacity() {
 	// Partially duplicated from Delete
 	for self.size > self.capacity {
@@ -201,8 +244,8 @@ func (self *LRUCache) checkCapacity() {
 		self.list.Remove(delElem)
 		delete(self.table, delValue.key)
 		self.size -= uint64(delValue.size)
-		if self.Evict != nil {
-			self.Evict(delValue.key, delValue.value)
-		}
+
+		self.evictSize += uint64(delValue.size)
+		self.evicts = append(self.evicts, KV{delValue.key, delValue.value})
 	}
 }
